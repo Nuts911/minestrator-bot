@@ -1,3 +1,5 @@
+process.env.PUPPETEER_SKIP_CHROMIUM_DOWNLOAD = "true";
+
 require("dotenv").config();
 
 const { Client, GatewayIntentBits } = require("discord.js");
@@ -23,7 +25,7 @@ async function log(channel, msg) {
 }
 
 // =======================
-// INIT BROWSER (RENDER SAFE)
+// BROWSER INIT
 // =======================
 async function getBrowser() {
 
@@ -128,7 +130,7 @@ async function restartServer(channel) {
 }
 
 // =======================
-// STOP
+// STOP SYSTEM
 // =======================
 async function stopSystem(channel) {
 
