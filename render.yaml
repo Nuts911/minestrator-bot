@@ -1,0 +1,6 @@
+services:
+  - type: worker
+    name: minestrator-bot
+    env: node
+    buildCommand: npm install
+    startCommand: npm start
