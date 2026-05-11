@@ -23,7 +23,7 @@ async function log(channel, msg) {
 }
 
 // =======================
-// BROWSER SAFE RENDER
+// INIT BROWSER (RENDER SAFE)
 // =======================
 async function getBrowser() {
 
@@ -34,7 +34,8 @@ async function getBrowser() {
         args: [
             "--no-sandbox",
             "--disable-setuid-sandbox",
-            "--disable-dev-shm-usage"
+            "--disable-dev-shm-usage",
+            "--single-process"
         ]
     });
 
@@ -44,7 +45,7 @@ async function getBrowser() {
 }
 
 // =======================
-// RESTART
+// RESTART SERVER
 // =======================
 async function restartServer(channel) {
 
@@ -52,7 +53,7 @@ async function restartServer(channel) {
 
         await getBrowser();
 
-        await log(channel, "🌐 Login MineStrator...");
+        await log(channel, "🌐 Connexion MineStrator...");
 
         await page.goto("https://minestrator.com/login", {
             waitUntil: "domcontentloaded"
@@ -74,7 +75,7 @@ async function restartServer(channel) {
 
         await sleep(10000);
 
-        await log(channel, "🎮 Serveur...");
+        await log(channel, "🎮 Accès serveur...");
 
         await page.goto(process.env.SERVER_URL, {
             waitUntil: "networkidle2"
@@ -82,7 +83,7 @@ async function restartServer(channel) {
 
         await sleep(8000);
 
-        await log(channel, "🔍 Recherche bouton...");
+        await log(channel, "🔍 Recherche bouton restart...");
 
         const buttons = await page.$$("button");
 
@@ -144,7 +145,7 @@ async function stopSystem(channel) {
 }
 
 // =======================
-// DISCORD
+// DISCORD BOT
 // =======================
 client.once("ready", () => {
     console.log(`Bot connecté : ${client.user.tag}`);
@@ -160,13 +161,13 @@ client.on("messageCreate", async (message) => {
 
         if (interval) return message.reply("⚠️ déjà actif");
 
-        await log(channel, "🚀 SYSTEME ACTIVÉ");
+        await log(channel, "🚀 SYSTEME ACTIVÉ (RENDER FIX)");
 
         await restartServer(channel);
 
         interval = setInterval(async () => {
 
-            await log(channel, "⏱️ restart 3h");
+            await log(channel, "⏱️ restart auto 3h");
 
             await restartServer(channel);
 
