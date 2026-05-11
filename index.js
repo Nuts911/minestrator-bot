@@ -23,44 +23,34 @@ async function log(channel, msg) {
 }
 
 // =======================
-// SAFE BROWSER INIT
+// BROWSER SAFE RENDER
 // =======================
-async function getBrowser(channel) {
+async function getBrowser() {
 
     if (browser) return browser;
 
-    await log(channel, "🔄 Lancement navigateur (Render safe)...");
-
     browser = await puppeteer.launch({
-        headless: false, // 👈 visible
-        slowMo: 40,
+        headless: "new",
         args: [
             "--no-sandbox",
             "--disable-setuid-sandbox",
-            "--disable-dev-shm-usage",
-            "--disable-blink-features=AutomationControlled"
+            "--disable-dev-shm-usage"
         ]
     });
 
     page = await browser.newPage();
 
-    page.setDefaultTimeout(60000);
-
     return browser;
 }
 
 // =======================
-// LOGIN + NAV
+// RESTART
 // =======================
 async function restartServer(channel) {
 
     try {
 
-        await getBrowser(channel);
-
-        // ======================
-        // LOGIN
-        // ======================
+        await getBrowser();
 
         await log(channel, "🌐 Login MineStrator...");
 
@@ -74,24 +64,17 @@ async function restartServer(channel) {
 
         if (inputs.length < 2) {
             await log(channel, "❌ Login introuvable");
-            await page.screenshot({ path: "login_error.png" });
             return;
         }
 
         await inputs[0].type(process.env.MINESTRATOR_EMAIL, { delay: 50 });
         await inputs[1].type(process.env.MINESTRATOR_PASSWORD, { delay: 50 });
 
-        await log(channel, "➡️ Connexion...");
-
         await page.keyboard.press("Enter");
 
         await sleep(10000);
 
-        // ======================
-        // SERVER PAGE
-        // ======================
-
-        await log(channel, "🎮 Accès serveur...");
+        await log(channel, "🎮 Serveur...");
 
         await page.goto(process.env.SERVER_URL, {
             waitUntil: "networkidle2"
@@ -99,13 +82,7 @@ async function restartServer(channel) {
 
         await sleep(8000);
 
-        await page.screenshot({ path: "server.png", fullPage: true });
-
-        // ======================
-        // FIND RESTART BUTTON
-        // ======================
-
-        await log(channel, "🔍 Recherche bouton Redémarrer...");
+        await log(channel, "🔍 Recherche bouton...");
 
         const buttons = await page.$$("button");
 
@@ -114,13 +91,11 @@ async function restartServer(channel) {
         for (const btn of buttons) {
 
             const text = await page.evaluate(el => el.innerText.toLowerCase(), btn);
-            const html = await page.evaluate(el => el.innerHTML.toLowerCase(), btn);
 
             if (
                 text.includes("redémarrer") ||
                 text.includes("redemarrer") ||
-                text.includes("restart") ||
-                html.includes("restart-alt")
+                text.includes("restart")
             ) {
                 restartBtn = btn;
                 break;
@@ -128,55 +103,33 @@ async function restartServer(channel) {
         }
 
         if (!restartBtn) {
-            await log(channel, "❌ Bouton Redémarrer introuvable");
-            await page.screenshot({ path: "restart_fail.png" });
+            await log(channel, "❌ Bouton introuvable");
+            await page.screenshot({ path: "error.png" });
             return;
         }
-
-        await log(channel, "⚡ Clic restart...");
 
         await restartBtn.click();
 
         await sleep(3000);
 
-        // confirmation popup
         const confirm = await page.$$("button");
 
         if (confirm[1]) {
-            try {
-                await confirm[1].click();
-                await log(channel, "✅ Confirmation OK");
-            } catch {}
+            await confirm[1].click();
         }
 
-        await log(channel, "🎉 SERVEUR RESTARTÉ");
+        await log(channel, "🎉 RESTART OK");
 
     } catch (err) {
-
         console.error(err);
-
         await log(channel, "❌ ERREUR: " + err.message);
-
-        if (page) {
-            await page.screenshot({ path: "error.png" });
-        }
-
-        // reset browser si crash
-        try {
-            if (browser) await browser.close();
-        } catch {}
-
-        browser = null;
-        page = null;
     }
 }
 
 // =======================
-// STOP SYSTEM
+// STOP
 // =======================
 async function stopSystem(channel) {
-
-    await log(channel, "🛑 Arrêt système...");
 
     clearInterval(interval);
     interval = null;
@@ -187,11 +140,11 @@ async function stopSystem(channel) {
         page = null;
     }
 
-    await log(channel, "🧹 Navigateur fermé");
+    await log(channel, "🛑 STOP");
 }
 
 // =======================
-// DISCORD BOT
+// DISCORD
 // =======================
 client.once("ready", () => {
     console.log(`Bot connecté : ${client.user.tag}`);
@@ -205,28 +158,28 @@ client.on("messageCreate", async (message) => {
 
     if (message.content === "!start") {
 
-        if (interval) return message.reply("⚠️ Déjà actif");
+        if (interval) return message.reply("⚠️ déjà actif");
 
-        await log(channel, "🚀 SYSTEME ACTIVÉ (RENDER MODE)");
+        await log(channel, "🚀 SYSTEME ACTIVÉ");
 
         await restartServer(channel);
 
         interval = setInterval(async () => {
 
-            await log(channel, "⏱️ Restart auto (3h)");
+            await log(channel, "⏱️ restart 3h");
 
             await restartServer(channel);
 
-        }, 3 * 60 * 60 * 1000); // 👈 3 HEURES
+        }, 3 * 60 * 60 * 1000);
 
-        message.reply("✅ Auto-restart activé (3h)");
+        message.reply("✅ activé");
 
     }
 
     if (message.content === "!stop") {
 
         await stopSystem(channel);
-        message.reply("🛑 arrêté");
+        message.reply("🛑 stop");
     }
 });
 
