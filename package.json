@@ -12,6 +12,6 @@
   "dependencies": {
     "discord.js": "^14.16.0",
     "dotenv": "^16.4.5",
-    "puppeteer": "^21.0.0"
+    "puppeteer": "^22.0.0"
   }
 }
