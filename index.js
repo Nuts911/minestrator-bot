@@ -1,6 +1,8 @@
 require("dotenv").config();
-const { Client, GatewayIntentBits, AttachmentBuilder, EmbedBuilder } = require("discord.js");
+
+const { Client, GatewayIntentBits, AttachmentBuilder } = require("discord.js");
 const puppeteer = require("puppeteer");
+const fs = require("fs");
 
 const client = new Client({
     intents: [
@@ -10,156 +12,267 @@ const client = new Client({
     ]
 });
 
-// Options de navigation pour ressembler à un VRAI humain et éviter les blocages
-const puppeteerOptions = {
-    headless: "new",
-    args: [
-        "--no-sandbox",
-        "--disable-setuid-sandbox",
-        "--disable-dev-shm-usage",
-        "--disable-gpu",
-        "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    ]
-};
+let interval = null;
+let browser = null;
+let page = null;
+let bearerToken = null;
 
-// Fonction pour envoyer un message avec une capture d'écran sur Discord
-async function sendScreenshot(channel, page, title, description) {
-    // Petite attente pour être sûr que le rendu visuel est complètement chargé
-    await new Promise(r => setTimeout(r, 3000));
-    
-    const screenshotBuffer = await page.screenshot({ fullPage: false });
-    const attachment = new AttachmentBuilder(screenshotBuffer, { name: "panel-action.png" });
-    
-    const embed = new EmbedBuilder()
-        .setTitle(title)
-        .setDescription(description)
-        .setImage("attachment://panel-action.png")
-        .setColor(0x3498db)
-        .setTimestamp();
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-    await channel.send({ embeds: [embed], files: [attachment] });
+async function log(channel, msg) {
+    console.log("[LOG]", msg);
+    if (channel) channel.send("📡 " + msg).catch(() => {});
 }
 
-// ==========================================
-// MOTEUR DE NAVIGATION ET CONNEXION RÉELLE
-// ==========================================
-async function runMinestratorAction(channel, actionName) {
-    console.log(`[PUPPETEER] Lancement du navigateur pour l'action : ${actionName}`);
-    const browser = await puppeteer.launch(puppeteerOptions);
-    const page = await browser.newPage();
-    
-    // Taille d'écran d'un ordinateur classique
-    await page.setViewport({ width: 1400, height: 900 });
-
+// =======================
+// SCREENSHOT → DISCORD
+// =======================
+async function sendScreenshot(channel, label = "screenshot") {
     try {
-        // 1. Aller sur la page de connexion
-        await page.goto("https://minestrator.com/login", { waitUntil: "networkidle2" });
+        if (!page) return;
+        const path = `/tmp/${label}_${Date.now()}.png`;
+        await page.screenshot({ path, fullPage: false });
+        const attachment = new AttachmentBuilder(path, { name: `${label}.png` });
+        await channel.send({ content: `📸 ${page.url()}`, files: [attachment] });
+        fs.unlinkSync(path);
+    } catch (err) {
+        console.error("[SCREENSHOT ERROR]", err.message);
+    }
+}
 
-        // 2. Remplir les vrais champs de connexion
-        await page.type('input[name="email"]', process.env.MINESTRATOR_EMAIL);
-        await page.type('input[name="password"]', process.env.MINESTRATOR_PASSWORD);
-        
-        const rememberCheckbox = await page.$('input[name="remember"]');
-        if (rememberCheckbox) await rememberCheckbox.click();
+// =======================
+// BROWSER
+// =======================
+async function getBrowser() {
+    if (browser) {
+        try { await browser.version(); return browser; }
+        catch { browser = null; page = null; bearerToken = null; }
+    }
 
-        // 3. Cliquer et attendre d'entrer sur le site
-        await Promise.all([
-            page.click('button[type="submit"]'),
-            page.waitForNavigation({ waitUntil: "networkidle2" })
-        ]);
+    console.log("[BROWSER] Lancement...");
 
-        console.log("[PUPPETEER] Connexion réussie. Navigation vers l'URL du serveur...");
-        
-        // 4. Aller sur ton serveur (445749)
-        await page.goto(process.env.SERVER_URL, { waitUntil: "networkidle2" });
-        await page.waitForSelector("body", { timeout: 15000 });
+    browser = await puppeteer.launch({
+        headless: "new",
+        args: [
+            "--no-sandbox",
+            "--disable-setuid-sandbox",
+            "--disable-dev-shm-usage",
+            "--disable-gpu",
+            "--no-first-run",
+            "--no-zygote",
+            "--disable-extensions",
+            "--disable-background-networking",
+            "--disable-default-apps",
+            "--mute-audio"
+        ]
+    });
 
-        // Si l'utilisateur a juste demandé un screenshot (!screen)
-        if (actionName === "screen") {
-            await sendScreenshot(channel, page, "🖥️ Capture d'écran du Panel", "Voici l'état actuel visible sur ton compte Minestrator.");
-            await browser.close();
-            return true;
-        }
+    page = await browser.newPage();
 
-        // 5. Recherche et clic sur le bouton d'action (Start ou Stop)
-        const actionClicked = await page.evaluate((action) => {
-            const elements = Array.from(document.querySelectorAll('button, a, span, i'));
-            
-            const keywords = {
-                start: ['démarrer', 'start', 'fa-play'],
-                stop: ['arrêter', 'stop', 'éteindre', 'kill', 'fa-stop']
-            };
+    await page.setUserAgent(
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    );
+    await page.setViewport({ width: 1280, height: 800 });
 
-            const targets = keywords[action];
-            
-            for (const el of elements) {
-                const text = el.textContent ? el.textContent.toLowerCase() : "";
-                const html = el.innerHTML ? el.innerHTML.toLowerCase() : "";
-                
-                const matchFound = targets.some(target => text.includes(target) || html.includes(target));
-                
-                if (matchFound) {
-                    const clickable = el.closest('button') || el.closest('a') || el;
-                    clickable.click();
-                    return true;
-                }
-            }
-            return false;
-        }, actionName);
-
-        if (actionClicked) {
-            // Attendre que l'action s'exécute à l'écran avant de prendre la photo
-            await new Promise(r => setTimeout(r, 4000));
-            await sendScreenshot(channel, page, `✅ Action ${actionName.toUpperCase()} effectuée`, `Le bouton a été cliqué. Voici le résultat en image :`);
+    // Bloque images/fonts pour économiser RAM
+    await page.setRequestInterception(true);
+    page.on("request", req => {
+        if (["image", "font", "media"].includes(req.resourceType())) {
+            req.abort();
         } else {
-            await sendScreenshot(channel, page, `⚠️ Bouton introuvable`, `Le script s'est connecté mais n'a pas détecté le bouton pour faire "${actionName}". Voici ce qu'il voit :`);
+            // Capture le Bearer token au passage
+            const auth = req.headers()["authorization"];
+            if (auth && auth.startsWith("Bearer ")) {
+                bearerToken = auth.replace("Bearer ", "");
+                console.log("[TOKEN] Capturé !");
+            }
+            req.continue();
+        }
+    });
+
+    browser.on("disconnected", () => {
+        console.log("[BROWSER] Déconnecté.");
+        browser = null; page = null; bearerToken = null;
+    });
+
+    console.log("[BROWSER] Prêt.");
+    return browser;
+}
+
+// =======================
+// LOGIN
+// =======================
+async function login(channel) {
+    try {
+        await log(channel, "🔐 Login MineStrator...");
+
+        await page.goto("https://minestrator.com/login", {
+            waitUntil: "domcontentloaded",
+            timeout: 30000
+        });
+
+        await sleep(2000);
+        await page.waitForSelector("input", { timeout: 15000 });
+
+        const inputs = await page.$$("input");
+        if (inputs.length < 2) {
+            await log(channel, "❌ Champs login introuvables");
+            await sendScreenshot(channel, "error_login");
+            return false;
         }
 
-        await browser.close();
-        return actionClicked;
+        await inputs[0].click({ clickCount: 3 });
+        await inputs[0].type(process.env.MINESTRATOR_EMAIL, { delay: 50 });
+        await inputs[1].click({ clickCount: 3 });
+        await inputs[1].type(process.env.MINESTRATOR_PASSWORD, { delay: 50 });
+        await page.keyboard.press("Enter");
 
-    } catch (error) {
-        console.error("[ERREUR DE NAVIGATION]", error);
-        // En cas de crash, on essaie quand même de prendre une photo de l'erreur pour voir ce qui bloque (ex: un Captcha)
-        try {
-            await sendScreenshot(channel, page, "❌ Erreur de parcours", `Le script a bloqué. Voici une capture d'écran de l'état actuel : \n\`${error.message}\``);
-        } catch (e) {
-            await channel.send(`❌ Impossible de générer la capture d'écran de l'erreur : ${error.message}`);
+        await page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 20000 }).catch(() => {});
+        await sleep(3000);
+
+        if (page.url().includes("/login")) {
+            await log(channel, "❌ Login échoué");
+            await sendScreenshot(channel, "error_auth");
+            return false;
         }
-        await browser.close();
+
+        await log(channel, "✅ Connecté !");
+        return true;
+
+    } catch (err) {
+        await log(channel, "❌ Erreur login: " + err.message);
         return false;
     }
 }
 
-// ==========================================
-// COMMANDES DISCORD
-// ==========================================
+// =======================
+// RESTART
+// =======================
+async function restartServer(channel) {
+    try {
+
+        // Reset browser à chaque restart
+        if (browser) {
+            try { await browser.close(); } catch {}
+            browser = null; page = null; bearerToken = null;
+        }
+
+        await getBrowser();
+
+        // Login
+        const ok = await login(channel);
+        if (!ok) return;
+
+        // Va sur la page serveur
+        const serverId = (process.env.SERVER_URL || "").split("/").filter(Boolean).pop();
+        await log(channel, "🎮 Accès panneau serveur...");
+
+        await page.goto(`https://minestrator.com/my/server/${serverId}`, {
+            waitUntil: "domcontentloaded",
+            timeout: 30000
+        });
+
+        await sleep(5000);
+        await sendScreenshot(channel, "panel");
+
+        // Attend que le token soit capturé
+        if (!bearerToken) {
+            await log(channel, "⏳ Attente token...");
+            await sleep(5000);
+        }
+
+        if (!bearerToken) {
+            await log(channel, "❌ Token non capturé");
+            await sendScreenshot(channel, "error_token");
+            return;
+        }
+
+        await log(channel, "🔑 Token capturé ! Envoi restart...");
+
+        // Ferme le browser pour libérer RAM
+        try { await browser.close(); } catch {}
+        browser = null; page = null;
+
+        // Envoie la commande restart via API
+        const res = await fetch(`https://mine.sttr.io/server/${serverId}/poweraction`, {
+            method: "PUT",
+            headers: {
+                "Authorization": `Bearer ${bearerToken}`,
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "Origin": "https://minestrator.com",
+                "Referer": "https://minestrator.com/",
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            },
+            body: JSON.stringify({ poweraction: "restart" })
+        });
+
+        console.log("[RESTART] Status:", res.status);
+
+        if (res.status === 200 || res.status === 201 || res.status === 204) {
+            await log(channel, "🎉 RESTART LANCÉ !");
+        } else {
+            const body = await res.text().catch(() => "");
+            await log(channel, `❌ Échec restart HTTP ${res.status} — ${body.slice(0, 100)}`);
+        }
+
+    } catch (err) {
+        console.error("[ERREUR]", err);
+        await log(channel, "❌ ERREUR: " + err.message);
+        if (browser) { try { await browser.close(); } catch {} browser = null; page = null; }
+    }
+}
+
+// =======================
+// STOP
+// =======================
+async function stopSystem(channel) {
+    clearInterval(interval);
+    interval = null;
+    bearerToken = null;
+    if (browser) { try { await browser.close(); } catch {} browser = null; page = null; }
+    await log(channel, "🛑 Système arrêté.");
+}
+
+// =======================
+// DISCORD
+// =======================
+client.once("ready", () => console.log(`✅ Bot connecté : ${client.user.tag}`));
+
 client.on("messageCreate", async (message) => {
-    if (message.author.bot || !message.content.startsWith("!")) return;
+    if (message.author.bot) return;
+    const channel = message.channel;
 
-    const command = message.content.toLowerCase();
-    const ch = message.channel;
-
-    if (command === "!screen") {
-        await message.reply("📸 Connexion en cours à ton compte pour prendre une capture...");
-        await runMinestratorAction(ch, "screen");
+    if (message.content === "!start") {
+        if (interval) return message.reply("⚠️ Déjà actif !");
+        await message.reply("🚀 Activation...");
+        await restartServer(channel);
+        interval = setInterval(async () => {
+            await log(channel, "⏱️ Restart auto 3h...");
+            await restartServer(channel);
+        }, 3 * 60 * 60 * 1000);
     }
 
-    if (command === "!start") {
-        await message.reply("⚡ Connexion et tentative de clic sur **Démarrer**...");
-        await runMinestratorAction(ch, "start");
+    if (message.content === "!stop") {
+        await stopSystem(channel);
+        await message.reply("🛑 Arrêté.");
     }
 
-    if (command === "!stop") {
-        await message.reply("🛑 Connexion et tentative de clic sur **Arrêter**...");
-        await runMinestratorAction(ch, "stop");
+    if (message.content === "!restart") {
+        await message.reply("🔄 Restart...");
+        await restartServer(channel);
+    }
+
+    if (message.content === "!status") {
+        await message.reply(interval
+            ? "✅ **Actif** — restart auto toutes les 3h."
+            : "🔴 **Inactif** — tape `!start`.");
+    }
+
+    if (message.content === "!screenshot") {
+        if (!page) return message.reply("❌ Aucune page ouverte.");
+        await sendScreenshot(channel, "manual");
     }
 });
-
-client.once("ready", () => {
-    console.log(`✅ Bot connecté : ${client.user.tag}`);
-});
-
-process.on("unhandledRejection", (reason) => console.error("[ANTI-CRASH]", reason));
 
 client.login(process.env.DISCORD_TOKEN);
