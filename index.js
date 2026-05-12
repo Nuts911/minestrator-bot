@@ -248,10 +248,12 @@ async function stopSystem(channel) {
 // =======================
 // DISCORD BOT
 // =======================
-client.once("ready", async () => {
+client.once("ready", () => {
     console.log(`✅ Bot connecté : ${client.user.tag}`);
-    await initBrowser();
-    await loginMinestrator(null);
+    // Lancer le navigateur en arrière-plan SANS bloquer le bot
+    initBrowser()
+        .then(() => loginMinestrator(null))
+        .catch((err) => console.error("[INIT ERREUR]", err.message));
 });
 
 client.on("messageCreate", async (message) => {
