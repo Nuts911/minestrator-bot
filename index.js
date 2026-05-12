@@ -3,119 +3,218 @@ const { Client, GatewayIntentBits, AttachmentBuilder, EmbedBuilder } = require("
 const puppeteer = require("puppeteer");
 
 const client = new Client({
-    intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent]
+    intents: [
+        GatewayIntentBits.Guilds,
+        GatewayIntentBits.GuildMessages,
+        GatewayIntentBits.MessageContent
+    ]
 });
 
-// Configuration Railway / Puppeteer
-const BROWSER_OPTIONS = {
+let autoRestartInterval = null;
+
+// Configuration de Puppeteer optimisée pour Railway (évite les crashs de mémoire)
+const puppeteerOptions = {
     headless: "new",
-    args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"]
+    args: [
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-gpu"
+    ]
 };
 
-// --- MOTEUR DE NAVIGATION ---
-async function getMinestratorScreenshot() {
-    const browser = await puppeteer.launch(BROWSER_OPTIONS);
+// ==========================================
+// FONCTION COMMUNE : CONNEXION ET NAVIGATION
+// ==========================================
+async function navigateToPanel() {
+    const browser = await puppeteer.launch(puppeteerOptions);
     const page = await browser.newPage();
     
-    try {
-        await page.setViewport({ width: 1280, height: 800 });
+    // Définir une taille d'écran standard pour le screenshot
+    await page.setViewport({ width: 1400, height: 900 });
 
-        // 1. Connexion
+    try {
+        console.log("[PUPPETEER] Connexion à Minestrator...");
         await page.goto("https://minestrator.com/login", { waitUntil: "networkidle2" });
+
+        // Remplir le formulaire de connexion réel
         await page.type('input[name="email"]', process.env.MINESTRATOR_EMAIL);
         await page.type('input[name="password"]', process.env.MINESTRATOR_PASSWORD);
-        await page.click('button[type="submit"]');
         
-        // Attendre la redirection sur le dashboard
-        await page.waitForNavigation({ waitUntil: "networkidle2" });
+        // Cocher "Se souvenir de moi" pour stabiliser la session
+        const rememberCheckbox = await page.$('input[name="remember"]');
+        if (rememberCheckbox) await rememberCheckbox.click();
 
-        // 2. Aller sur le serveur spécifique
+        // Cliquer sur le bouton de connexion
+        await Promise.all([
+            page.click('button[type="submit"]'),
+            page.waitForNavigation({ waitUntil: "networkidle2" })
+        ]);
+
+        console.log("[PUPPETEER] Accès au panel du serveur...");
+        // Aller directement sur l'URL de ton serveur
         await page.goto(process.env.SERVER_URL, { waitUntil: "networkidle2" });
-
-        // 3. Prendre la photo
-        // On attend que le panel de contrôle soit visible
-        await page.waitForSelector("body"); 
-        const screenshot = await page.screenshot({ fullPage: false });
-
+        
+        return { browser, page };
+    } catch (error) {
         await browser.close();
-        return screenshot;
-    } catch (e) {
-        await browser.close();
-        throw e;
+        throw error;
     }
 }
 
-async function runPowerAction(action) {
-    const browser = await puppeteer.launch(BROWSER_OPTIONS);
-    const page = await browser.newPage();
-    
-    try {
-        await page.goto("https://minestrator.com/login", { waitUntil: "networkidle2" });
-        await page.type('input[name="email"]', process.env.MINESTRATOR_EMAIL);
-        await page.type('input[name="password"]', process.env.MINESTRATOR_PASSWORD);
-        await page.click('button[type="submit"]');
-        await page.waitForNavigation();
-
-        await page.goto(process.env.SERVER_URL, { waitUntil: "networkidle2" });
-
-        // On cherche le bouton spécifique (Start, Stop, ou Restart)
-        // Note: Les sélecteurs dépendent du design de Minestrator
-        const selectors = {
-            "start": ".btn-success", 
-            "stop": ".btn-danger",
-            "restart": ".btn-primary"
-        };
-
-        await page.click(selectors[action.toLowerCase()]);
-        await new Promise(r => setTimeout(r, 2000)); // Attendre que l'action soit prise en compte
-        
-        await browser.close();
-        return true;
-    } catch (e) {
-        await browser.close();
-        return false;
-    }
-}
-
-// --- COMMANDES DISCORD ---
+// ==========================================
+// LOGIQUE DES COMMANDES
+// ==========================================
 
 client.on("messageCreate", async (message) => {
-    if (message.author.bot) return;
+    if (message.author.bot || !message.content.startsWith("!")) return;
 
-    // COMMANDE !SCREEN
-    if (message.content === "!screen") {
-        const msg = await message.reply("📸 Capture d'écran en cours (connexion à Minestrator)...");
+    const command = message.content.toLowerCase();
+
+    // ----- COMMANDE !SCREEN -----
+    if (command === "!screen") {
+        const waitingMessage = await message.reply("📸 Connexion à Minestrator et capture d'écran en cours...");
+        
         try {
-            const buffer = await getMinestratorScreenshot();
-            const attachment = new AttachmentBuilder(buffer, { name: "panel.png" });
+            const { browser, page } = await navigateToPanel();
             
+            // Attendre un peu que les graphiques ou la console chargent sur la page
+            await new Promise(r => setTimeout(r, 3000));
+
+            // Prendre le screenshot réel
+            const screenshotBuffer = await page.screenshot({ fullPage: false });
+            await browser.close();
+
+            // Envoi de la vraie image sur Discord
+            const attachment = new AttachmentBuilder(screenshotBuffer, { name: "panel-screenshot.png" });
             const embed = new EmbedBuilder()
-                .setTitle("🖥️ Screenshot du Panel Minestrator")
-                .setImage("attachment://panel.png")
-                .setColor(0x00AE86)
+                .setTitle("🖥️ Statut Réel du Panel Minestrator")
+                .setURL(process.env.SERVER_URL)
+                .setImage("attachment://panel-screenshot.png")
+                .setColor(0x3498db)
                 .setTimestamp();
 
-            await msg.delete();
+            await waitingMessage.delete();
             await message.reply({ embeds: [embed], files: [attachment] });
+
         } catch (err) {
             console.error(err);
-            await msg.edit("❌ Erreur : Impossible de prendre le screenshot. Vérifie tes identifiants.");
+            await waitingMessage.edit("❌ Impossible de prendre une capture d'écran. Vérifie tes identifiants ou si le site est accessible.");
         }
     }
 
-    // COMMANDES !START / !STOP
-    if (message.content === "!start" || message.content === "!stop") {
-        const action = message.content.replace("!", "");
-        const msg = await message.reply(`⏳ Exécution de l'action **${action}** sur le panel...`);
+    // ----- COMMANDE !START (ALLUMAGE + ROUTINE 3H) -----
+    if (command === "!start") {
+        if (autoRestartInterval) return message.reply("⚠️ La routine d'auto-restart de 3h est déjà active !");
         
-        const success = await runPowerAction(action);
-        if (success) {
-            await msg.edit(`✅ Action **${action}** envoyée avec succès au serveur.`);
-        } else {
-            await msg.edit("❌ Échec de l'action. Le bouton n'a pas pu être cliqué.");
+        const waitingMessage = await message.reply("⚡ Tentative d'allumage du serveur via le panel...");
+
+        try {
+            const { browser, page } = await navigateToPanel();
+
+            // Sélecteur générique pour le bouton de démarrage (Minestrator utilise souvent des classes spécifiques ou des icônes)
+            // On cherche un bouton qui contient l'action ou la couleur verte de démarrage
+            const startClicked = await page.evaluate(() => {
+                // Recherche du bouton Start par sa classe ou son texte de manière brute
+                const buttons = Array.from(document.querySelectorAll('button, a'));
+                const startBtn = buttons.find(b => 
+                    b.textContent.toLowerCase().includes('démarrer') || 
+                    b.textContent.toLowerCase().includes('start') ||
+                    b.innerHTML.includes('fa-play')
+                );
+                if (startBtn) {
+                    startBtn.click();
+                    return true;
+                }
+                return false;
+            });
+
+            await new Promise(r => setTimeout(r, 2000));
+            await browser.close();
+
+            if (startClicked) {
+                // Activer la boucle de redémarrage toutes les 3 heures
+                autoRestartInterval = setInterval(async () => {
+                    console.log("[AUTO] Exécution du redémarrage automatique des 3h...");
+                    try {
+                        const { browser: b, page: p } = await navigateToPanel();
+                        await p.evaluate(() => {
+                            const btns = Array.from(document.querySelectorAll('button, a'));
+                            const restartBtn = btns.find(btn => 
+                                btn.textContent.toLowerCase().includes('redémarrer') || 
+                                btn.textContent.toLowerCase().includes('restart') ||
+                                btn.innerHTML.includes('fa-redo')
+                            );
+                            if (restartBtn) restartBtn.click();
+                        });
+                        await new Promise(r => setTimeout(r, 2000));
+                        await b.close();
+                    } catch (e) {
+                        console.error("[AUTO] Échec du restart automatique:", e);
+                    }
+                }, 3 * 60 * 60 * 1000);
+
+                await waitingMessage.edit("🚀 Le serveur a reçu l'ordre de **Démarrage**.\n⏱️ La routine de redémarrage automatique (toutes les 3h) est maintenant **Activée** !");
+            } else {
+                await waitingMessage.edit("⚠️ Impossible de trouver le bouton 'Démarrer' sur la page. Es-tu sûr que le serveur n'est pas déjà en ligne ?");
+            }
+
+        } catch (err) {
+            console.error(err);
+            await waitingMessage.edit("❌ Erreur lors de la tentative d'allumage.");
+        }
+    }
+
+    // ----- COMMANDE !STOP (EXTINCTION + ARRÊT DE LA BOUCLE) -----
+    if (command === "!stop") {
+        const waitingMessage = await message.reply("🛑 Tentative d'arrêt du serveur via le panel...");
+
+        if (autoRestartInterval) {
+            clearInterval(autoRestartInterval);
+            autoRestartInterval = null;
+        }
+
+        try {
+            const { browser, page } = await navigateToPanel();
+
+            const stopClicked = await page.evaluate(() => {
+                const buttons = Array.from(document.querySelectorAll('button, a'));
+                const stopBtn = buttons.find(b => 
+                    b.textContent.toLowerCase().includes('arrêter') || 
+                    b.textContent.toLowerCase().includes('stop') || 
+                    b.textContent.toLowerCase().includes('éteindre') ||
+                    b.innerHTML.includes('fa-stop')
+                );
+                if (stopBtn) {
+                    stopBtn.click();
+                    return true;
+                }
+                return false;
+            });
+
+            await new Promise(r => setTimeout(r, 2000));
+            await browser.close();
+
+            if (stopClicked) {
+                await waitingMessage.edit("✅ Le serveur a reçu l'ordre d'**Arrêt**.\n🛑 La routine d'auto-restart de 3h a été **Désactivée**.");
+            } else {
+                await waitingMessage.edit("⚠️ Impossible de trouver le bouton 'Arrêter' sur la page. Le serveur est peut-être déjà coupé.");
+            }
+
+        } catch (err) {
+            console.error(err);
+            await waitingMessage.edit("❌ Erreur lors de la tentative d'arrêt.");
         }
     }
 });
 
-client.once("ready", () => console.log(`✅ Bot "Real-Panel" connecté : ${client.user.tag}`));
+client.once("ready", () => {
+    console.log(`[BOT] Connecté en tant que ${client.user.tag}`);
+});
+
+// Protection contre le crash du processus sur Railway
+process.on("unhandledRejection", (error) => {
+    console.error("[CRASH PREVENTED] Erreur non gérée :", error);
+});
+
 client.login(process.env.DISCORD_TOKEN);
