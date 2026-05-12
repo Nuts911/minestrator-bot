@@ -39,14 +39,9 @@ async function getBrowser() {
 
     console.log("[BROWSER] Lancement Chromium...");
 
-    const execPath = process.env.PUPPETEER_EXECUTABLE_PATH
-        || puppeteer.executablePath();
-
-    console.log("[BROWSER] executablePath:", execPath);
-
     browser = await puppeteer.launch({
         headless: "new",
-        executablePath: execPath,
+        executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || puppeteer.executablePath(),
         args: [
             "--no-sandbox",
             "--disable-setuid-sandbox",
@@ -82,12 +77,47 @@ async function getBrowser() {
 }
 
 // =======================
+// INJECTION COOKIES
+// =======================
+async function injectCookies() {
+    const cookies = [
+        {
+            name: "PHPSESSID",
+            value: process.env.COOKIE_PHPSESSID,
+            domain: "minestrator.com",
+            path: "/"
+        },
+        {
+            name: "api-key",
+            value: process.env.COOKIE_API_KEY,
+            domain: "minestrator.com",
+            path: "/"
+        },
+        {
+            name: "auth-state",
+            value: process.env.COOKIE_AUTH_STATE || "authenticated",
+            domain: "minestrator.com",
+            path: "/"
+        },
+        {
+            name: "cw_conversation",
+            value: process.env.COOKIE_CW,
+            domain: "minestrator.com",
+            path: "/"
+        }
+    ].filter(c => c.value); // ignore les cookies non définis
+
+    await page.setCookie(...cookies);
+    console.log("[COOKIES] Injectés :", cookies.map(c => c.name).join(", "));
+}
+
+// =======================
 // ENVOYER SCREENSHOT
 // =======================
 async function sendScreenshot(channel, label = "screenshot") {
     try {
         if (!page) {
-            await channel.send("❌ Aucune page ouverte actuellement.");
+            await channel.send("❌ Aucune page ouverte.");
             return;
         }
 
@@ -100,7 +130,7 @@ async function sendScreenshot(channel, label = "screenshot") {
             files: [attachment]
         });
 
-        fs.unlinkSync(path); // supprime le fichier après envoi
+        fs.unlinkSync(path);
     } catch (err) {
         await channel.send("❌ Erreur screenshot: " + err.message);
     }
@@ -112,6 +142,7 @@ async function sendScreenshot(channel, label = "screenshot") {
 async function restartServer(channel) {
     try {
 
+        // Reset browser à chaque restart
         if (browser) {
             try { await browser.close(); } catch {}
             browser = null;
@@ -120,46 +151,20 @@ async function restartServer(channel) {
 
         await getBrowser();
 
-        // ---- ÉTAPE 1 : LOGIN ----
-        await log(channel, "🌐 Connexion à MineStrator...");
+        // ---- INJECTION COOKIES (bypass login) ----
+        await log(channel, "🍪 Injection des cookies...");
 
-        await page.goto("https://minestrator.com/login", {
+        // On doit d'abord visiter le domaine avant d'injecter les cookies
+        await page.goto("https://minestrator.com", {
             waitUntil: "domcontentloaded",
             timeout: 30000
         });
 
-        await sleep(3000);
-        await page.waitForSelector("input", { timeout: 15000 });
+        await injectCookies();
 
-        const inputs = await page.$$("input");
+        // ---- PAGE SERVEUR ----
+        await log(channel, "🎮 Accès au panneau serveur...");
 
-        if (inputs.length < 2) {
-            await log(channel, "❌ Champs de login introuvables.");
-            await sendScreenshot(channel, "error_login");
-            return;
-        }
-
-        await inputs[0].click({ clickCount: 3 });
-        await inputs[0].type(process.env.MINESTRATOR_EMAIL, { delay: 60 });
-
-        await inputs[1].click({ clickCount: 3 });
-        await inputs[1].type(process.env.MINESTRATOR_PASSWORD, { delay: 60 });
-
-        await page.keyboard.press("Enter");
-
-        await page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 20000 }).catch(() => {});
-        await sleep(3000);
-
-        const currentUrl = page.url();
-        if (currentUrl.includes("/login")) {
-            await log(channel, "❌ Échec login — vérifiez email/mot de passe.");
-            await sendScreenshot(channel, "error_auth");
-            return;
-        }
-
-        await log(channel, "✅ Connecté ! Accès au panneau serveur...");
-
-        // ---- ÉTAPE 2 : PAGE SERVEUR ----
         await page.goto(process.env.SERVER_URL, {
             waitUntil: "domcontentloaded",
             timeout: 30000
@@ -167,18 +172,26 @@ async function restartServer(channel) {
 
         await sleep(5000);
 
-        // Screenshot automatique pour voir la page
+        // Screenshot pour vérifier qu'on est bien connecté
         await sendScreenshot(channel, "panel");
 
-        await log(channel, "🔍 Recherche du bouton restart...");
+        // Vérifie qu'on est connecté (pas redirigé vers login)
+        const currentUrl = page.url();
+        if (currentUrl.includes("/login")) {
+            await log(channel, "❌ Cookies expirés — reconnecte-toi sur le site et mets à jour les cookies dans le .env");
+            return;
+        }
 
-        // Debug : liste tous les boutons
+        await log(channel, "✅ Connecté ! Recherche du bouton restart...");
+
+        // Debug : liste tous les boutons trouvés
         const allButtons = await page.evaluate(() => {
             const buttons = Array.from(document.querySelectorAll("button, a, [role='button']"));
             return buttons.map(el => el.innerText?.trim()).filter(t => t.length > 0);
         });
         await log(channel, "🔎 Boutons: " + allButtons.slice(0, 20).join(" | "));
 
+        // Cherche le bouton restart
         const restartBtn = await page.evaluateHandle(() => {
             const buttons = Array.from(document.querySelectorAll("button, a, [role='button']"));
             return buttons.find(el => {
@@ -187,7 +200,8 @@ async function restartServer(channel) {
                     text.includes("redémarrer") ||
                     text.includes("redemarrer") ||
                     text.includes("restart") ||
-                    text.includes("reboot")
+                    text.includes("reboot") ||
+                    text.includes("relancer")
                 );
             }) || null;
         });
@@ -203,7 +217,7 @@ async function restartServer(channel) {
         await restartBtn.click();
         await sleep(2000);
 
-        // ---- ÉTAPE 3 : CONFIRMATION ----
+        // Confirmation éventuelle
         const confirmed = await page.evaluate(() => {
             const buttons = Array.from(document.querySelectorAll("button, a, [role='button']"));
             const confirmBtn = buttons.find(el => {
@@ -304,14 +318,14 @@ client.on("messageCreate", async (message) => {
         }
     }
 
-    // !screenshot — prend un screenshot de la page actuelle
+    // !screenshot
     if (message.content === "!screenshot") {
         if (!page) return message.reply("❌ Aucune page ouverte. Lance `!start` d'abord.");
         await message.reply("📸 Screenshot en cours...");
         await sendScreenshot(channel, "manual");
     }
 
-    // !goto <url> — navigue vers une URL et envoie un screenshot
+    // !goto <url>
     if (message.content.startsWith("!goto ")) {
         const url = message.content.replace("!goto ", "").trim();
         if (!page) return message.reply("❌ Aucune page ouverte. Lance `!start` d'abord.");
