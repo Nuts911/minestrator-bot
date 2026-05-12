@@ -2,7 +2,7 @@ services:
   - type: worker
     name: minestrator-bot
     env: node
-    buildCommand: npm install && node_modules/.bin/puppeteer browsers install chrome
+    buildCommand: npm install && PUPPETEER_CACHE_DIR=/opt/render/project/src/.cache/puppeteer node_modules/.bin/puppeteer browsers install chrome
     startCommand: npm start
     envVars:
       - key: DISCORD_TOKEN
@@ -13,4 +13,5 @@ services:
         sync: false
       - key: SERVER_URL
         sync: false
-
+      - key: PUPPETEER_CACHE_DIR
+        value: /opt/render/project/src/.cache/puppeteer

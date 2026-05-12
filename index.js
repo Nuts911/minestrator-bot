@@ -28,7 +28,6 @@ async function log(channel, msg) {
 async function getBrowser() {
     if (browser) {
         try {
-            // Vérifie que le browser est encore vivant
             await browser.version();
             return browser;
         } catch {
@@ -39,9 +38,14 @@ async function getBrowser() {
 
     console.log("[BROWSER] Lancement Chromium...");
 
+    const execPath = process.env.PUPPETEER_EXECUTABLE_PATH
+        || puppeteer.executablePath();
+
+    console.log("[BROWSER] executablePath:", execPath);
+
     browser = await puppeteer.launch({
         headless: "new",
-        executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || puppeteer.executablePath(),
+        executablePath: execPath,
         args: [
             "--no-sandbox",
             "--disable-setuid-sandbox",
@@ -60,7 +64,6 @@ async function getBrowser() {
 
     page = await browser.newPage();
 
-    // User-agent réaliste pour éviter la détection bot
     await page.setUserAgent(
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     );
@@ -83,7 +86,6 @@ async function getBrowser() {
 async function restartServer(channel) {
     try {
 
-        // Reset browser à chaque restart pour éviter les sessions corrompues
         if (browser) {
             try { await browser.close(); } catch {}
             browser = null;
@@ -102,18 +104,16 @@ async function restartServer(channel) {
 
         await sleep(3000);
 
-        // Attend que les champs soient présents
         await page.waitForSelector("input", { timeout: 15000 });
 
         const inputs = await page.$$("input");
 
         if (inputs.length < 2) {
-            await log(channel, "❌ Champs de login introuvables sur la page.");
+            await log(channel, "❌ Champs de login introuvables.");
             await page.screenshot({ path: "/tmp/error_login.png" });
             return;
         }
 
-        // Efface et tape les identifiants
         await inputs[0].click({ clickCount: 3 });
         await inputs[0].type(process.env.MINESTRATOR_EMAIL, { delay: 60 });
 
@@ -122,11 +122,9 @@ async function restartServer(channel) {
 
         await page.keyboard.press("Enter");
 
-        // Attend la navigation post-login
         await page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 20000 }).catch(() => {});
         await sleep(3000);
 
-        // Vérifie qu'on est bien connecté
         const currentUrl = page.url();
         if (currentUrl.includes("/login")) {
             await log(channel, "❌ Échec login — vérifiez email/mot de passe.");
@@ -146,7 +144,6 @@ async function restartServer(channel) {
 
         await log(channel, "🔍 Recherche du bouton restart...");
 
-        // Cherche tous les boutons visibles
         const restartBtn = await page.evaluateHandle(() => {
             const buttons = Array.from(document.querySelectorAll("button, a, [role='button']"));
             return buttons.find(el => {
@@ -163,7 +160,7 @@ async function restartServer(channel) {
         const isFound = await page.evaluate(el => el !== null, restartBtn);
 
         if (!isFound) {
-            await log(channel, "❌ Bouton restart introuvable. Screenshot sauvegardé.");
+            await log(channel, "❌ Bouton restart introuvable.");
             await page.screenshot({ path: "/tmp/error_btn.png" });
             return;
         }
@@ -172,7 +169,6 @@ async function restartServer(channel) {
         await sleep(2000);
 
         // ---- ÉTAPE 3 : CONFIRMATION ----
-        // Cherche un bouton de confirmation dans une modale éventuelle
         const confirmed = await page.evaluate(() => {
             const buttons = Array.from(document.querySelectorAll("button, a, [role='button']"));
             const confirmBtn = buttons.find(el => {
@@ -197,14 +193,13 @@ async function restartServer(channel) {
         if (confirmed) {
             await log(channel, "🎉 RESTART CONFIRMÉ ET LANCÉ !");
         } else {
-            await log(channel, "🎉 RESTART LANCÉ (pas de confirmation nécessaire) !");
+            await log(channel, "🎉 RESTART LANCÉ !");
         }
 
     } catch (err) {
         console.error("[ERREUR]", err);
         await log(channel, "❌ ERREUR: " + err.message);
 
-        // Reset propre en cas d'erreur
         if (browser) {
             try { await browser.close(); } catch {}
             browser = null;
@@ -241,32 +236,26 @@ client.on("messageCreate", async (message) => {
 
     const channel = message.channel;
 
-    // !start — active le bot et lance un premier restart
     if (message.content === "!start") {
         if (interval) return message.reply("⚠️ Le système est déjà actif !");
-
         await message.reply("🚀 Système activé ! Premier restart en cours...");
         await restartServer(channel);
-
         interval = setInterval(async () => {
             await log(channel, "⏱️ Restart automatique toutes les 3h...");
             await restartServer(channel);
         }, 3 * 60 * 60 * 1000);
     }
 
-    // !stop — stoppe tout
     if (message.content === "!stop") {
         await stopSystem(channel);
         await message.reply("🛑 Système arrêté.");
     }
 
-    // !restart — force un restart immédiat sans relancer le timer
     if (message.content === "!restart") {
         await message.reply("🔄 Restart manuel en cours...");
         await restartServer(channel);
     }
 
-    // !status — indique si le système est actif
     if (message.content === "!status") {
         if (interval) {
             await message.reply("✅ Système **actif** — restart auto toutes les 3h.");

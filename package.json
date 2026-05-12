@@ -13,5 +13,8 @@
     "discord.js": "^14.16.0",
     "dotenv": "^16.4.5",
     "puppeteer": "^22.0.0"
+  },
+  "puppeteer": {
+    "cacheDirectory": "/opt/render/project/src/.cache/puppeteer"
   }
 }
