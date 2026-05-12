@@ -13,5 +13,13 @@ services:
         sync: false
       - key: SERVER_URL
         sync: false
+      - key: COOKIE_PHPSESSID
+        sync: false
+      - key: COOKIE_API_KEY
+        sync: false
+      - key: COOKIE_AUTH_STATE
+        sync: false
+      - key: COOKIE_CW
+        sync: false
       - key: PUPPETEER_CACHE_DIR
         value: /opt/render/project/src/.cache/puppeteer
