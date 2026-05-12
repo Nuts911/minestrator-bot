@@ -1,7 +1,8 @@
 require("dotenv").config();
 
-const { Client, GatewayIntentBits } = require("discord.js");
+const { Client, GatewayIntentBits, AttachmentBuilder } = require("discord.js");
 const puppeteer = require("puppeteer");
+const fs = require("fs");
 
 const client = new Client({
     intents: [
@@ -81,6 +82,31 @@ async function getBrowser() {
 }
 
 // =======================
+// ENVOYER SCREENSHOT
+// =======================
+async function sendScreenshot(channel, label = "screenshot") {
+    try {
+        if (!page) {
+            await channel.send("❌ Aucune page ouverte actuellement.");
+            return;
+        }
+
+        const path = `/tmp/${label}_${Date.now()}.png`;
+        await page.screenshot({ path, fullPage: true });
+
+        const attachment = new AttachmentBuilder(path, { name: `${label}.png` });
+        await channel.send({
+            content: `📸 **Screenshot** — ${page.url()}`,
+            files: [attachment]
+        });
+
+        fs.unlinkSync(path); // supprime le fichier après envoi
+    } catch (err) {
+        await channel.send("❌ Erreur screenshot: " + err.message);
+    }
+}
+
+// =======================
 // RESTART SERVER
 // =======================
 async function restartServer(channel) {
@@ -103,14 +129,13 @@ async function restartServer(channel) {
         });
 
         await sleep(3000);
-
         await page.waitForSelector("input", { timeout: 15000 });
 
         const inputs = await page.$$("input");
 
         if (inputs.length < 2) {
             await log(channel, "❌ Champs de login introuvables.");
-            await page.screenshot({ path: "/tmp/error_login.png" });
+            await sendScreenshot(channel, "error_login");
             return;
         }
 
@@ -128,7 +153,7 @@ async function restartServer(channel) {
         const currentUrl = page.url();
         if (currentUrl.includes("/login")) {
             await log(channel, "❌ Échec login — vérifiez email/mot de passe.");
-            await page.screenshot({ path: "/tmp/error_auth.png" });
+            await sendScreenshot(channel, "error_auth");
             return;
         }
 
@@ -142,7 +167,17 @@ async function restartServer(channel) {
 
         await sleep(5000);
 
+        // Screenshot automatique pour voir la page
+        await sendScreenshot(channel, "panel");
+
         await log(channel, "🔍 Recherche du bouton restart...");
+
+        // Debug : liste tous les boutons
+        const allButtons = await page.evaluate(() => {
+            const buttons = Array.from(document.querySelectorAll("button, a, [role='button']"));
+            return buttons.map(el => el.innerText?.trim()).filter(t => t.length > 0);
+        });
+        await log(channel, "🔎 Boutons: " + allButtons.slice(0, 20).join(" | "));
 
         const restartBtn = await page.evaluateHandle(() => {
             const buttons = Array.from(document.querySelectorAll("button, a, [role='button']"));
@@ -161,7 +196,7 @@ async function restartServer(channel) {
 
         if (!isFound) {
             await log(channel, "❌ Bouton restart introuvable.");
-            await page.screenshot({ path: "/tmp/error_btn.png" });
+            await sendScreenshot(channel, "error_btn");
             return;
         }
 
@@ -189,6 +224,7 @@ async function restartServer(channel) {
         });
 
         await sleep(2000);
+        await sendScreenshot(channel, "after_restart");
 
         if (confirmed) {
             await log(channel, "🎉 RESTART CONFIRMÉ ET LANCÉ !");
@@ -236,6 +272,7 @@ client.on("messageCreate", async (message) => {
 
     const channel = message.channel;
 
+    // !start
     if (message.content === "!start") {
         if (interval) return message.reply("⚠️ Le système est déjà actif !");
         await message.reply("🚀 Système activé ! Premier restart en cours...");
@@ -246,22 +283,42 @@ client.on("messageCreate", async (message) => {
         }, 3 * 60 * 60 * 1000);
     }
 
+    // !stop
     if (message.content === "!stop") {
         await stopSystem(channel);
         await message.reply("🛑 Système arrêté.");
     }
 
+    // !restart
     if (message.content === "!restart") {
         await message.reply("🔄 Restart manuel en cours...");
         await restartServer(channel);
     }
 
+    // !status
     if (message.content === "!status") {
         if (interval) {
             await message.reply("✅ Système **actif** — restart auto toutes les 3h.");
         } else {
             await message.reply("🔴 Système **inactif** — tape `!start` pour démarrer.");
         }
+    }
+
+    // !screenshot — prend un screenshot de la page actuelle
+    if (message.content === "!screenshot") {
+        if (!page) return message.reply("❌ Aucune page ouverte. Lance `!start` d'abord.");
+        await message.reply("📸 Screenshot en cours...");
+        await sendScreenshot(channel, "manual");
+    }
+
+    // !goto <url> — navigue vers une URL et envoie un screenshot
+    if (message.content.startsWith("!goto ")) {
+        const url = message.content.replace("!goto ", "").trim();
+        if (!page) return message.reply("❌ Aucune page ouverte. Lance `!start` d'abord.");
+        await message.reply(`🌐 Navigation vers ${url}...`);
+        await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30000 }).catch(() => {});
+        await sleep(3000);
+        await sendScreenshot(channel, "goto");
     }
 });
 
