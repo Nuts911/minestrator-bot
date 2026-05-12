@@ -1,6 +1,9 @@
 require("dotenv").config();
 
-const { Client, GatewayIntentBits } = require("discord.js");
+const { Client, GatewayIntentBits, AttachmentBuilder } = require("discord.js");
+const puppeteer = require("puppeteer");
+const path = require("path");
+const fs = require("fs");
 
 const client = new Client({
     intents: [
@@ -11,7 +14,9 @@ const client = new Client({
 });
 
 let interval = null;
-let cookies = {}; // Cookies stockés en mémoire
+let browser = null;
+let page = null;
+let isLoggedIn = false;
 
 // =======================
 // UTILITAIRES
@@ -21,32 +26,55 @@ async function log(channel, msg) {
     if (channel) channel.send("📡 " + msg).catch(() => {});
 }
 
-function buildCookieString(cookieObj) {
-    return Object.entries(cookieObj)
-        .map(([k, v]) => `${k}=${v}`)
-        .join("; ");
-}
-
-function parseCookies(setCookieHeaders) {
-    const result = {};
-    for (const header of setCookieHeaders) {
-        const part = header.split(";")[0].trim();
-        const eqIdx = part.indexOf("=");
-        if (eqIdx !== -1) {
-            const key = part.substring(0, eqIdx).trim();
-            const val = part.substring(eqIdx + 1).trim();
-            result[key] = val;
-        }
+// Prend un screenshot et l'envoie sur Discord
+async function screenshot(channel, label = "screenshot") {
+    if (!page || !channel) return;
+    try {
+        const tmpPath = path.join("/tmp", `${label}-${Date.now()}.png`);
+        await page.screenshot({ path: tmpPath, fullPage: false });
+        const attachment = new AttachmentBuilder(tmpPath, { name: `${label}.png` });
+        await channel.send({ content: `📸 **${label}**`, files: [attachment] });
+        fs.unlinkSync(tmpPath);
+    } catch (err) {
+        console.error("[SCREENSHOT ERREUR]", err.message);
     }
-    return result;
 }
 
 // =======================
-// LOGIN MINESTRATOR
+// INIT PUPPETEER
+// =======================
+async function initBrowser() {
+    if (browser) {
+        try { await browser.close(); } catch (_) {}
+    }
+    browser = await puppeteer.launch({
+        headless: "new",
+        args: [
+            "--no-sandbox",
+            "--disable-setuid-sandbox",
+            "--disable-dev-shm-usage",
+            "--disable-gpu",
+            "--no-first-run",
+            "--no-zygote",
+            "--single-process"
+        ]
+    });
+    page = await browser.newPage();
+    await page.setViewport({ width: 1280, height: 800 });
+    await page.setUserAgent(
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36"
+    );
+    console.log("[BROWSER] Navigateur lancé");
+}
+
+// =======================
+// LOGIN MINESTRATOR (via vrai navigateur)
 // =======================
 async function loginMinestrator(channel) {
     try {
-        await log(channel, "🔐 Connexion à Minestrator...");
+        await log(channel, "🔐 Ouverture du navigateur...");
+
+        if (!browser || !page) await initBrowser();
 
         const email    = process.env.MINESTRATOR_EMAIL;
         const password = process.env.MINESTRATOR_PASSWORD;
@@ -56,125 +84,155 @@ async function loginMinestrator(channel) {
             return false;
         }
 
-        // Étape 1 : récupérer la page de login pour le token CSRF
-        const getRes = await fetch("https://minestrator.com/login", {
-            method: "GET",
-            headers: {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36",
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
-            }
+        await log(channel, "🌐 Chargement de la page login...");
+        await page.goto("https://minestrator.com/login", {
+            waitUntil: "networkidle2",
+            timeout: 30000
         });
 
-        const setCookieGet = getRes.headers.getSetCookie ? getRes.headers.getSetCookie() : [];
-        const initCookies = parseCookies(setCookieGet);
-        const html = await getRes.text();
+        await screenshot(channel, "01-page-login");
 
-        // Récupération du token CSRF dans le HTML
-        const csrfMatch = html.match(/name="_token"\s+value="([^"]+)"/);
-        const csrfToken = csrfMatch ? csrfMatch[1] : null;
+        // Remplir le formulaire
+        await page.waitForSelector('input[name="email"]', { timeout: 10000 });
+        await page.type('input[name="email"]', email, { delay: 50 });
+        await page.type('input[name="password"]', password, { delay: 50 });
 
-        console.log("[LOGIN] CSRF token:", csrfToken ? "trouvé" : "non trouvé");
+        await screenshot(channel, "02-formulaire-rempli");
 
-        // Étape 2 : envoyer le formulaire de login
-        const body = new URLSearchParams();
-        body.append("email", email);
-        body.append("password", password);
-        if (csrfToken) body.append("_token", csrfToken);
+        // Soumettre
+        await Promise.all([
+            page.waitForNavigation({ waitUntil: "networkidle2", timeout: 30000 }),
+            page.click('button[type="submit"]')
+        ]);
 
-        const postRes = await fetch("https://minestrator.com/login", {
-            method: "POST",
-            headers: {
-                "Content-Type": "application/x-www-form-urlencoded",
-                "Cookie": buildCookieString(initCookies),
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36",
-                "Origin": "https://minestrator.com",
-                "Referer": "https://minestrator.com/login",
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
-            },
-            body: body.toString(),
-            redirect: "manual" // On gère les redirections manuellement pour récupérer les cookies
-        });
+        await screenshot(channel, "03-apres-login");
 
-        console.log("[LOGIN] Status POST:", postRes.status);
+        // Vérifier si connecté
+        const currentUrl = page.url();
+        console.log("[LOGIN] URL après login:", currentUrl);
 
-        const setCookiePost = postRes.headers.getSetCookie ? postRes.headers.getSetCookie() : [];
-        const newCookies = parseCookies(setCookiePost);
-
-        // Fusion des cookies
-        cookies = { ...initCookies, ...newCookies };
-
-        // Vérification : on doit avoir PHPSESSID au minimum
-        if (!cookies["PHPSESSID"]) {
-            await log(channel, "❌ Login échoué — vérifie email/mot de passe dans les variables Railway.");
+        if (currentUrl.includes("/login")) {
+            await log(channel, "❌ Login échoué — mauvais email/mot de passe ?");
+            isLoggedIn = false;
             return false;
         }
 
-        console.log("[LOGIN] Cookies récupérés:", Object.keys(cookies).join(", "));
+        isLoggedIn = true;
         await log(channel, "✅ Connecté à Minestrator !");
         return true;
 
     } catch (err) {
         console.error("[LOGIN ERREUR]", err);
+        if (page) await screenshot(channel, "erreur-login").catch(() => {});
         await log(channel, "❌ Erreur login: " + err.message);
+        isLoggedIn = false;
         return false;
     }
 }
 
 // =======================
-// RESTART SERVER
+// RESTART SERVER (via vrai navigateur)
 // =======================
 async function restartServer(channel) {
     try {
-        // Si pas de cookies, on tente un login
-        if (!cookies["PHPSESSID"]) {
+        if (!isLoggedIn) {
             const ok = await loginMinestrator(channel);
             if (!ok) return;
         }
 
-        await log(channel, "🔄 Envoi de la commande restart...");
+        await log(channel, "🔄 Navigation vers le panel serveur...");
 
-        const serverId = (process.env.SERVER_URL || "").split("/").filter(Boolean).pop();
-
-        if (!serverId) {
+        const serverUrl = process.env.SERVER_URL;
+        if (!serverUrl) {
             await log(channel, "❌ SERVER_URL manquant !");
             return;
         }
 
-        const res = await fetch(`https://mine.sttr.io/server/${serverId}/poweraction`, {
-            method: "PUT",
-            headers: {
-                "Content-Type": "application/json",
-                "Accept": "application/json",
-                "Cookie": buildCookieString(cookies),
-                "Origin": "https://minestrator.com",
-                "Referer": "https://minestrator.com/",
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36"
-            },
-            body: JSON.stringify({ poweraction: "restart" })
+        // Aller sur la page du serveur
+        await page.goto(serverUrl, {
+            waitUntil: "networkidle2",
+            timeout: 30000
         });
 
-        console.log("[RESTART] Status:", res.status);
-        const body = await res.text().catch(() => "");
-        console.log("[RESTART] Body:", body.slice(0, 200));
+        await screenshot(channel, "04-panel-serveur");
 
-        // Si session expirée → on reconnecte et on réessaie une fois
-        if (res.status === 401 || res.status === 403) {
-            await log(channel, "⚠️ Session expirée, reconnexion...");
-            cookies = {};
-            const ok = await loginMinestrator(channel);
-            if (!ok) return;
-            return await restartServer(channel); // Retry
-        }
+        // Extraire l'ID du serveur depuis l'URL
+        const serverId = serverUrl.split("/").filter(Boolean).pop();
 
-        if (res.status === 200 || res.status === 201 || res.status === 204) {
+        // Appel API depuis le contexte navigateur (cookies déjà présents)
+        await log(channel, "🔄 Envoi de la commande restart...");
+
+        const result = await page.evaluate(async (serverId) => {
+            try {
+                const res = await fetch(`https://mine.sttr.io/server/${serverId}/poweraction`, {
+                    method: "PUT",
+                    headers: {
+                        "Content-Type": "application/json",
+                        "Accept": "application/json",
+                        "Origin": "https://minestrator.com",
+                        "Referer": "https://minestrator.com/"
+                    },
+                    credentials: "include",
+                    body: JSON.stringify({ poweraction: "restart" })
+                });
+                const body = await res.text().catch(() => "");
+                return { status: res.status, body: body.slice(0, 300) };
+            } catch (err) {
+                return { status: 0, body: err.message };
+            }
+        }, serverId);
+
+        console.log("[RESTART] Status:", result.status);
+        console.log("[RESTART] Body:", result.body);
+
+        await screenshot(channel, "05-apres-restart");
+
+        if (result.status === 200 || result.status === 201 || result.status === 204) {
             await log(channel, "🎉 RESTART LANCÉ AVEC SUCCÈS !");
+        } else if (result.status === 401 || result.status === 403) {
+            await log(channel, "⚠️ Session expirée, reconnexion...");
+            isLoggedIn = false;
+            await loginMinestrator(channel);
+            // Retry une fois
+            const result2 = await page.evaluate(async (serverId) => {
+                try {
+                    const res = await fetch(`https://mine.sttr.io/server/${serverId}/poweraction`, {
+                        method: "PUT",
+                        headers: {
+                            "Content-Type": "application/json",
+                            "Accept": "application/json",
+                            "Origin": "https://minestrator.com",
+                            "Referer": "https://minestrator.com/"
+                        },
+                        credentials: "include",
+                        body: JSON.stringify({ poweraction: "restart" })
+                    });
+                    const body = await res.text().catch(() => "");
+                    return { status: res.status, body: body.slice(0, 300) };
+                } catch (err) {
+                    return { status: 0, body: err.message };
+                }
+            }, serverId);
+
+            await screenshot(channel, "06-retry-restart");
+
+            if (result2.status === 200 || result2.status === 201 || result2.status === 204) {
+                await log(channel, "🎉 RESTART LANCÉ AVEC SUCCÈS (retry) !");
+            } else {
+                await log(channel, `❌ Échec restart après reconnexion (HTTP ${result2.status})\n\`\`\`${result2.body}\`\`\``);
+            }
         } else {
-            await log(channel, `❌ Échec restart (HTTP ${res.status}) — ${body.slice(0, 100)}`);
+            await log(channel, `❌ Échec restart (HTTP ${result.status})\n\`\`\`${result.body}\`\`\``);
         }
 
     } catch (err) {
-        console.error("[ERREUR]", err);
-        await log(channel, "❌ ERREUR: " + err.message);
+        console.error("[RESTART ERREUR]", err);
+        if (page) await screenshot(channel, "erreur-restart").catch(() => {});
+        await log(channel, "❌ ERREUR restart: " + err.message);
+
+        // Si le navigateur est cassé, on le relance
+        isLoggedIn = false;
+        try { await initBrowser(); } catch (_) {}
     }
 }
 
@@ -184,7 +242,7 @@ async function restartServer(channel) {
 async function stopSystem(channel) {
     clearInterval(interval);
     interval = null;
-    await log(channel, "🛑 Système arrêté proprement.");
+    await log(channel, "🛑 Système arrêté.");
 }
 
 // =======================
@@ -192,16 +250,14 @@ async function stopSystem(channel) {
 // =======================
 client.once("ready", async () => {
     console.log(`✅ Bot connecté : ${client.user.tag}`);
-    // Login automatique au démarrage
+    await initBrowser();
     await loginMinestrator(null);
 });
 
 client.on("messageCreate", async (message) => {
     if (message.author.bot) return;
-
     const channel = message.channel;
 
-    // !start
     if (message.content === "!start") {
         if (interval) return message.reply("⚠️ Le système est déjà actif !");
         await message.reply("🚀 Système activé ! Premier restart en cours...");
@@ -212,45 +268,46 @@ client.on("messageCreate", async (message) => {
         }, 3 * 60 * 60 * 1000);
     }
 
-    // !stop
     if (message.content === "!stop") {
         await stopSystem(channel);
         await message.reply("🛑 Système arrêté.");
     }
 
-    // !restart
     if (message.content === "!restart") {
         await message.reply("🔄 Restart manuel en cours...");
         await restartServer(channel);
     }
 
-    // !status
     if (message.content === "!status") {
-        if (interval) {
-            await message.reply("✅ Système **actif** — restart auto toutes les 3h.");
-        } else {
-            await message.reply("🔴 Système **inactif** — tape `!start` pour démarrer.");
-        }
+        await message.reply(interval
+            ? "✅ Système **actif** — restart auto toutes les 3h."
+            : "🔴 Système **inactif** — tape `!start` pour démarrer."
+        );
     }
 
-    // !debug
     if (message.content === "!debug") {
         const serverId = (process.env.SERVER_URL || "").split("/").filter(Boolean).pop();
         await message.reply(
             `🔧 **Debug info:**\n` +
             `• SERVER_ID: \`${serverId || "❌ manquant"}\`\n` +
-            `• DISCORD_TOKEN: ${process.env.DISCORD_TOKEN ? "✅" : "❌ manquant"}\n` +
             `• EMAIL: ${process.env.MINESTRATOR_EMAIL ? "✅" : "❌ manquant"}\n` +
             `• PASSWORD: ${process.env.MINESTRATOR_PASSWORD ? "✅" : "❌ manquant"}\n` +
-            `• Session active: ${cookies["PHPSESSID"] ? "✅ oui" : "🔴 non connecté"}\n` +
-            `• Intervalle actif: ${interval ? "✅ oui" : "🔴 non"}`
+            `• Navigateur: ${browser ? "✅ actif" : "❌ inactif"}\n` +
+            `• Session: ${isLoggedIn ? "✅ connecté" : "🔴 déconnecté"}\n` +
+            `• Intervalle: ${interval ? "✅ actif" : "🔴 inactif"}`
         );
     }
 
-    // !login (forcer reconnexion manuelle)
+    // Forcer reconnexion + screenshot
     if (message.content === "!login") {
-        cookies = {};
+        isLoggedIn = false;
         await loginMinestrator(channel);
+    }
+
+    // Screenshot de la page actuelle
+    if (message.content === "!screen") {
+        if (!page) return message.reply("❌ Navigateur non démarré.");
+        await screenshot(channel, "capture-manuelle");
     }
 });
 
