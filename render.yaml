@@ -13,5 +13,4 @@ services:
         sync: false
       - key: SERVER_URL
         sync: false
-      - key: PUPPETEER_CACHE_DIR
-        value: /opt/render/project/src/.cache/puppeteer
+
